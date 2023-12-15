@@ -53,6 +53,8 @@ module CHIP #(                                                                  
     localparam BNE = 3'b001;
     localparam BLT = 3'b100;
     localparam BGE = 3'b101;
+    // JALR mask
+    localparam MASK_JALR = {{BIT_W-1{1'b1}}, 1'b0};
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Wires and Registers
@@ -66,12 +68,13 @@ module CHIP #(                                                                  
     wire [4:0] rs1, rs2, rd;
     wire [BIT_W-1:0] reg_rdata1, reg_rdata2;
     reg  [BIT_W-1:0] reg_wdata;
-    wire [BIT_W-1:0] imm_I, imm_S, imm_B, imm_U, imm_J, mask_JALR;
+    wire [BIT_W-1:0] imm_I, imm_S, imm_B, imm_U, imm_J;
 
     wire alu_active, alu_slt, alu_mul, muldiv_stall;
     reg  branch_taken;
     reg  [9:0] alu_operation;
-    reg  [BIT_W-1:0] alu_operand, alu_product, alu_result;
+    reg  [BIT_W-1:0] alu_operand, alu_result;
+    wire [2*BIT_W-1:0] alu_product;
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Continuous Assignment
@@ -103,8 +106,7 @@ module CHIP #(                                                                  
     assign imm_B      = {{BIT_W-12{i_IMEM_data[31]}}, i_IMEM_data[7], i_IMEM_data[30:25], i_IMEM_data[11:8], 1'b0};
     assign imm_U      = {i_IMEM_data[31:12], 12'b0};
     assign imm_J      = {{BIT_W-20{i_IMEM_data[31]}}, i_IMEM_data[19:12], i_IMEM_data[20], i_IMEM_data[30:21], 1'b0};
-    assign mask_JALR  = {{BIT_W-1{1'b1}}, 1'b0};
-    assign alu_active = (opcode == STORE) || (opcode == IOP32) || (opcode == ROP32);
+    assign alu_active = (opcode == BRANCH) || (opcode == LOAD) || (opcode == STORE) || (opcode == IOP32) || (opcode == ROP32);
     assign alu_mul    = (alu_operation == MUL);
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -130,6 +132,8 @@ module CHIP #(                                                                  
     );
 
     MULDIV_unit#(.BW(BIT_W)) muldiv_unit_alu(
+        .i_clk     (i_clk),
+        .i_rst_n   (i_rst_n),
         .i_a       (reg_rdata1),
         .i_b       (alu_operand),
         .i_valid   (alu_mul),
@@ -148,7 +152,7 @@ module CHIP #(                                                                  
         else begin
             case (opcode)
                 JAL:     PC_w = PC_r + imm_J;
-                JALR:    PC_w = PC_r + ((reg_rdata1 + imm_I) & mask_JALR);
+                JALR:    PC_w = (reg_rdata1 + imm_I) & MASK_JALR;
                 BRANCH:  PC_w = PC_r + (branch_taken ? imm_B : 4);
                 default: PC_w = PC_r + 4;
             endcase
@@ -178,7 +182,11 @@ module CHIP #(                                                                  
                 alu_operation = {7'b0, i_IMEM_data[14:12]};
                 alu_operand   = imm_I;
             end
-            LOAD, STORE: begin
+            LOAD: begin
+                alu_operation = ADD;
+                alu_operand   = imm_I;
+            end
+            STORE: begin
                 alu_operation = ADD;
                 alu_operand   = imm_S;
             end
@@ -196,14 +204,14 @@ module CHIP #(                                                                  
     always @(*) begin
         if (alu_active) begin
             case (alu_operation)
-                ADD: alu_result = reg_rdata1 + alu_operand;
-                SUB: alu_result = reg_rdata1 - alu_operand;
-                SLL: alu_result = reg_rdata1 << alu_operand;
-                SLT: alu_result = {{BIT_W-1{1'b0}}, alu_slt};
-                XOR: alu_result = reg_rdata1 ^ alu_operand;
-                SRA: alu_result = $unsigned($signed(reg_rdata1) >>> alu_operand[SHSIZE-1:0]);
-                AND: alu_result = reg_rdata1 & alu_operand;
-                MUL: alu_result = alu_product;
+                ADD:     alu_result = reg_rdata1 + alu_operand;
+                SUB:     alu_result = reg_rdata1 - alu_operand;
+                SLL:     alu_result = reg_rdata1 << alu_operand;
+                SLT:     alu_result = {{BIT_W-1{1'b0}}, alu_slt};
+                XOR:     alu_result = reg_rdata1 ^ alu_operand;
+                SRA:     alu_result = $unsigned($signed(reg_rdata1) >>> alu_operand[SHSIZE-1:0]);
+                AND:     alu_result = reg_rdata1 & alu_operand;
+                MUL:     alu_result = alu_product[BIT_W-1:0];
                 default: alu_result = {BIT_W{1'b0}};
             endcase
         end
@@ -213,10 +221,10 @@ module CHIP #(                                                                  
     always @(*) begin
         if (opcode == BRANCH) begin
             case (i_IMEM_data[14:12])
-                BEQ: branch_taken = ~|alu_result;
-                BNE: branch_taken = |alu_result;
-                BLT: branch_taken = alu_slt;
-                BGE: branch_taken = !alu_slt;
+                BEQ:     branch_taken = ~|alu_result;
+                BNE:     branch_taken = |alu_result;
+                BLT:     branch_taken = alu_slt;
+                BGE:     branch_taken = !alu_slt;
                 default: branch_taken = 1'b0;
             endcase
         end
@@ -284,32 +292,63 @@ endmodule
 module MULDIV_unit #(
     parameter BW = 32
 ) (
-    input [BW-1:0] i_a,
-    input [BW-1:0] i_b,
-    input          i_valid,
-    output         o_product,
-    output         o_stall
+    input             i_clk,
+    input             i_rst_n,
+    input  [BW-1:0]   i_a,
+    input  [BW-1:0]   i_b,
+    input             i_valid,
+    output [2*BW-1:0] o_product,
+    output            o_stall
 );
 
     localparam S_IDLE = 1'b0;
     localparam S_CALC = 1'b1;
 
     reg state_w, state_r;
-    reg [31:0] counter_w, counter_r;
+    reg [BW-1:0]   a_w, a_r, b_w, b_r;
+    wire [2*BW-1:0] product[BW:0];
+    genvar i;
 
-    assign o_stall = (state_w == S_CALC);
+    assign o_stall   = i_valid && (state_r == S_IDLE);
+    assign o_product = (state_r == S_CALC) ? product[BW] : {(2*BW){1'b0}};
+
+    assign product[0] = {{BW{1'b0}}, i_a};
+    generate
+        for (i = 0; i < BW; i = i + 1)
+        begin: gen_product
+            assign product[i+1] = (product[i] + (product[i][0] ? {i_b, {BW{1'b0}}} : {(2*BW){1'b0}})) >> 1;
+        end
+    endgenerate
 
     always @(*) begin
         case (state_r)
             S_IDLE: begin
-                if (i_valid) state_w = S_CALC;
-                else         state_w = S_IDLE;
+                if (i_valid) begin
+                    state_w = S_CALC;
+                    a_w     = i_a;
+                    b_w     = i_b;
+                end
+                else begin
+                    state_w = S_IDLE;
+                    a_w     = {BW{1'b0}};
+                    b_w     = {BW{1'b0}};
+                end
             end
             S_CALC: begin
-                if (counter_r == BW-1) state_w = S_IDLE;
-                else                   state_w = S_CALC;
+                state_w = S_IDLE;
+                a_w     = {BW{1'b0}};
+                b_w     = {BW{1'b0}};
             end
         endcase
+    end
+
+    always @(posedge i_clk or negedge i_rst_n) begin
+        if (!i_rst_n) begin
+            state_r   <= S_IDLE;
+        end
+        else begin
+            state_r   <= state_w;
+        end
     end
 
 
