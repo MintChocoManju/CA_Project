@@ -1,5 +1,3 @@
-import numpy as np
-
 def sort(v, n):
     for i in range(n):
         for j in range(i-1,-1,-1):

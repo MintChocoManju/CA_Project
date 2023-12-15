@@ -28,39 +28,113 @@ module CHIP #(                                                                  
 // Parameters
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 
-    // TODO: any declaration
+    parameter SHSIZE = 5;
+    // opcode
+    localparam AUIPC  = 7'b0010111;
+    localparam JAL    = 7'b1101111;
+    localparam JALR   = 7'b1100111;
+    localparam ROP32  = 7'b0110011;
+    localparam IOP32  = 7'b0010011;
+    localparam LOAD   = 7'b0000011;
+    localparam STORE  = 7'b0100011;
+    localparam BRANCH = 7'b1100011;
+    localparam ECALL  = 7'b1110011;
+    // funct7 + funct3
+    localparam ADD = 10'b0000000_000;
+    localparam SUB = 10'b0100000_000;
+    localparam SLL = 10'b0000000_001;
+    localparam SLT = 10'b0000000_010;
+    localparam XOR = 10'b0000000_100;
+    localparam SRA = 10'b0100000_101;
+    localparam AND = 10'b0000000_111;
+    localparam MUL = 10'b0000001_000;
+    // branch funct3
+    localparam BEQ = 3'b000;
+    localparam BNE = 3'b001;
+    localparam BLT = 3'b100;
+    localparam BGE = 3'b101;
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Wires and Registers
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
     
-    // TODO: any declaration
-        reg [BIT_W-1:0] PC, next_PC;
-        wire mem_cen, mem_wen;
-        wire [BIT_W-1:0] mem_addr, mem_wdata, mem_rdata;
-        wire mem_stall;
+    reg [BIT_W-1:0] PC_r, PC_w;
+
+    reg imem_cen;
+    wire [6:0] opcode;
+    wire stall, reg_write, has_rs1, has_rs2, has_rd;
+    wire [4:0] rs1, rs2, rd;
+    wire [BIT_W-1:0] reg_rdata1, reg_rdata2;
+    reg  [BIT_W-1:0] reg_wdata;
+    wire [BIT_W-1:0] imm_I, imm_S, imm_B, imm_U, imm_J, mask_JALR;
+
+    wire alu_active, alu_slt, alu_mul, muldiv_stall;
+    reg  branch_taken;
+    reg  [9:0] alu_operation;
+    reg  [BIT_W-1:0] alu_operand, alu_product, alu_result;
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Continuous Assignment
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 
-    // TODO: any wire assignment
+    assign o_IMEM_addr   = PC_r;
+    assign o_IMEM_cen    = imem_cen;
+    assign o_DMEM_cen    = (opcode == LOAD) || (opcode == STORE);
+    assign o_DMEM_wen    = (opcode == STORE);
+    assign o_DMEM_addr   = o_DMEM_cen ? alu_result : {BIT_W{1'b0}};
+    assign o_DMEM_wdata  = (opcode == STORE) ? reg_rdata2 : {BIT_W{1'b0}};
+    assign o_finish      = (opcode == ECALL);
+    assign o_proc_finish = (opcode == ECALL);
+
+    assign stall = i_DMEM_stall | muldiv_stall;
+
+    assign opcode     = i_IMEM_data[6:0];
+    assign has_rs1    = (opcode == JALR) || (opcode == BRANCH) || (opcode == LOAD) || (opcode == STORE)
+                     || (opcode == IOP32) || (opcode == ROP32);
+    assign rs1        = has_rs1 ? i_IMEM_data[19:15] : 5'b0;
+    assign has_rs2    = (opcode == BRANCH) || (opcode == STORE) || (opcode == ROP32);
+    assign rs2        = has_rs2 ? i_IMEM_data[24:20] : 5'b0;
+    assign has_rd     = (opcode == AUIPC) || (opcode == JAL) || (opcode == JALR) || (opcode == LOAD)
+                     || (opcode == IOP32) || (opcode == ROP32);
+    assign rd         = has_rd ? i_IMEM_data[11:7] : 5'b0;
+    assign reg_write  = has_rd && !stall;
+    assign imm_I      = {{BIT_W-11{i_IMEM_data[31]}}                , i_IMEM_data[30:20]};
+    assign imm_S      = {{BIT_W-11{i_IMEM_data[31]}}                , i_IMEM_data[30:25], i_IMEM_data[11:7]};
+    assign imm_B      = {{BIT_W-12{i_IMEM_data[31]}}, i_IMEM_data[7], i_IMEM_data[30:25], i_IMEM_data[11:8], 1'b0};
+    assign imm_U      = {i_IMEM_data[31:12], 12'b0};
+    assign imm_J      = {{BIT_W-20{i_IMEM_data[31]}}, i_IMEM_data[19:12], i_IMEM_data[20], i_IMEM_data[30:21], 1'b0};
+    assign mask_JALR  = {{BIT_W-1{1'b1}}, 1'b0};
+    assign alu_active = (opcode == STORE) || (opcode == IOP32) || (opcode == ROP32);
+    assign alu_mul    = (alu_operation == MUL);
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Submoddules
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 
-    // TODO: Reg_file wire connection
     Reg_file reg0(               
         .i_clk  (i_clk),             
         .i_rst_n(i_rst_n),         
-        .wen    (),          
-        .rs1    (),                
-        .rs2    (),                
-        .rd     (),                 
-        .wdata  (),             
-        .rdata1 (),           
-        .rdata2 ()
+        .wen    (reg_write),          
+        .rs1    (rs1),                
+        .rs2    (rs2),                
+        .rd     (rd),                 
+        .wdata  (reg_wdata),             
+        .rdata1 (reg_rdata1),           
+        .rdata2 (reg_rdata2)
+    );
+
+    SLT_unit#(.BW(BIT_W)) slt_unit_alu(
+        .i_a   (reg_rdata1),
+        .i_b   (alu_operand),
+        .o_slt (alu_slt)
+    );
+
+    MULDIV_unit#(.BW(BIT_W)) muldiv_unit_alu(
+        .i_a       (reg_rdata1),
+        .i_b       (alu_operand),
+        .i_valid   (alu_mul),
+        .o_product (alu_product),
+        .o_stall   (muldiv_stall)
     );
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -69,12 +143,96 @@ module CHIP #(                                                                  
     
     // Todo: any combinational/sequential circuit
 
-    always @(posedge i_clk or negedge i_rst_n) begin
-        if (!i_rst_n) begin
-            PC <= 32'h00010000; // Do not modify this value!!!
+    always @(*) begin
+        if (stall) PC_w = PC_r;
+        else begin
+            case (opcode)
+                JAL:     PC_w = PC_r + imm_J;
+                JALR:    PC_w = PC_r + ((reg_rdata1 + imm_I) & mask_JALR);
+                BRANCH:  PC_w = PC_r + (branch_taken ? imm_B : 4);
+                default: PC_w = PC_r + 4;
+            endcase
+        end
+    end
+
+    always @(*) begin
+        if (stall) reg_wdata = {BIT_W{1'b0}};
+        else begin
+            case (opcode)
+                AUIPC:        reg_wdata = PC_r + imm_U;
+                JAL, JALR:    reg_wdata = PC_r + 4;
+                ROP32, IOP32: reg_wdata = alu_result;
+                LOAD:         reg_wdata = i_DMEM_rdata;
+                default:      reg_wdata = {BIT_W{1'b0}};
+            endcase
+        end
+    end
+
+    always @(*) begin
+        case (opcode)
+            ROP32: begin
+                alu_operation = {i_IMEM_data[31:25], i_IMEM_data[14:12]};
+                alu_operand   = reg_rdata2;
+            end
+            IOP32: begin
+                alu_operation = {7'b0, i_IMEM_data[14:12]};
+                alu_operand   = imm_I;
+            end
+            LOAD, STORE: begin
+                alu_operation = ADD;
+                alu_operand   = imm_S;
+            end
+            BRANCH: begin
+                alu_operation = XOR;
+                alu_operand   = reg_rdata2;
+            end
+            default: begin
+                alu_operation = 10'b0;
+                alu_operand   = {BIT_W{1'b0}};
+            end
+        endcase
+    end
+
+    always @(*) begin
+        if (alu_active) begin
+            case (alu_operation)
+                ADD: alu_result = reg_rdata1 + alu_operand;
+                SUB: alu_result = reg_rdata1 - alu_operand;
+                SLL: alu_result = reg_rdata1 << alu_operand;
+                SLT: alu_result = {{BIT_W-1{1'b0}}, alu_slt};
+                XOR: alu_result = reg_rdata1 ^ alu_operand;
+                SRA: alu_result = $unsigned($signed(reg_rdata1) >>> alu_operand[SHSIZE-1:0]);
+                AND: alu_result = reg_rdata1 & alu_operand;
+                MUL: alu_result = alu_product;
+                default: alu_result = {BIT_W{1'b0}};
+            endcase
+        end
+        else alu_result = {BIT_W{1'b0}};
+    end
+
+    always @(*) begin
+        if (opcode == BRANCH) begin
+            case (i_IMEM_data[14:12])
+                BEQ: branch_taken = ~|alu_result;
+                BNE: branch_taken = |alu_result;
+                BLT: branch_taken = alu_slt;
+                BGE: branch_taken = !alu_slt;
+                default: branch_taken = 1'b0;
+            endcase
         end
         else begin
-            PC <= next_PC;
+            branch_taken = 1'b0;
+        end
+    end
+
+    always @(posedge i_clk or negedge i_rst_n) begin
+        if (!i_rst_n) begin
+            PC_r     <= 32'h00010000; // Do not modify this value!!!
+            imem_cen <= 1'b1;
+        end
+        else begin
+            PC_r     <= PC_w;
+            imem_cen <= !stall;
         end
     end
 endmodule
@@ -123,10 +281,62 @@ module Reg_file(i_clk, i_rst_n, wen, rs1, rs2, rd, wdata, rdata1, rdata2);
     end
 endmodule
 
-module MULDIV_unit(
-    // TODO: port declaration
-    );
-    // Todo: HW2
+module MULDIV_unit #(
+    parameter BW = 32
+) (
+    input [BW-1:0] i_a,
+    input [BW-1:0] i_b,
+    input          i_valid,
+    output         o_product,
+    output         o_stall
+);
+
+    localparam S_IDLE = 1'b0;
+    localparam S_CALC = 1'b1;
+
+    reg state_w, state_r;
+    reg [31:0] counter_w, counter_r;
+
+    assign o_stall = (state_w == S_CALC);
+
+    always @(*) begin
+        case (state_r)
+            S_IDLE: begin
+                if (i_valid) state_w = S_CALC;
+                else         state_w = S_IDLE;
+            end
+            S_CALC: begin
+                if (counter_r == BW-1) state_w = S_IDLE;
+                else                   state_w = S_CALC;
+            end
+        endcase
+    end
+
+
+endmodule
+
+module SLT_unit #(
+    parameter BW = 32
+) (
+    input [BW-1:0] i_a,
+    input [BW-1:0] i_b,
+    output         o_slt
+);
+
+    wire [BW-1:0] diff;
+    reg slt;
+
+    assign diff = i_a - i_b;
+    assign o_slt = slt;
+
+    always @(*) begin
+        case ({i_a[BW-1], i_b[BW-1]})
+            2'b01:   slt = 1'b0;             // pos, neg
+            2'b10:   slt = 1'b1;             // neg, pos
+            default: slt = diff[BW-1];
+        endcase
+    end
+    
 endmodule
 
 module Cache#(
