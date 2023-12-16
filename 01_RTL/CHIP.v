@@ -86,7 +86,7 @@ module CHIP #(                                                                  
     assign o_DMEM_wen    = (opcode == STORE);
     assign o_DMEM_addr   = o_DMEM_cen ? alu_result : {BIT_W{1'b0}};
     assign o_DMEM_wdata  = (opcode == STORE) ? reg_rdata2 : {BIT_W{1'b0}};
-    assign o_finish      = (opcode == ECALL);
+    assign o_finish      = (opcode == ECALL) && !stall;
     assign o_proc_finish = (opcode == ECALL);
 
     assign stall = i_DMEM_stall | muldiv_stall;
@@ -179,7 +179,8 @@ module CHIP #(                                                                  
                 alu_operand   = reg_rdata2;
             end
             IOP32: begin
-                alu_operation = {7'b0, i_IMEM_data[14:12]};
+                if (i_IMEM_data[14:12] == 3'b101) alu_operation = {i_IMEM_data[31:25], i_IMEM_data[14:12]}; // Right shift special case
+                else                              alu_operation = {7'b0              , i_IMEM_data[14:12]};
                 alu_operand   = imm_I;
             end
             LOAD: begin
