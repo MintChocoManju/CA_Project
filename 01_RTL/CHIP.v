@@ -207,7 +207,7 @@ module CHIP #(                                                                  
             case (alu_operation)
                 ADD:     alu_result = reg_rdata1 + alu_operand;
                 SUB:     alu_result = reg_rdata1 - alu_operand;
-                SLL:     alu_result = reg_rdata1 << alu_operand;
+                SLL:     alu_result = reg_rdata1 << alu_operand[SHSIZE-1:0];
                 SLT:     alu_result = {{BIT_W-1{1'b0}}, alu_slt};
                 XOR:     alu_result = reg_rdata1 ^ alu_operand;
                 SRA:     alu_result = $unsigned($signed(reg_rdata1) >>> alu_operand[SHSIZE-1:0]);
