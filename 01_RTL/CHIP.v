@@ -55,14 +55,20 @@ module CHIP #(                                                                  
     localparam BGE = 3'b101;
     // JALR mask
     localparam MASK_JALR = {{BIT_W-1{1'b1}}, 1'b0};
+    // store skipping states
+    localparam S_NORM  = 2'd0;
+    localparam S_SKIP  = 2'd1;
+    localparam S_STORE = 2'd2;
+    localparam S_LOAD  = 2'd3;
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Wires and Registers
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
     
+    reg [1:0] state_r, state_w;
     reg [BIT_W-1:0] PC_r, PC_w;
 
-    reg imem_cen;
+    reg imem_cen, dmem_wen, dmem_stall;
     wire [6:0] opcode;
     wire stall, reg_write, has_rs1, has_rs2, has_rd;
     wire [4:0] rs1, rs2, rd;
@@ -83,13 +89,13 @@ module CHIP #(                                                                  
     assign o_IMEM_addr   = PC_r;
     assign o_IMEM_cen    = imem_cen;
     assign o_DMEM_cen    = (opcode == LOAD) || (opcode == STORE);
-    assign o_DMEM_wen    = (opcode == STORE);
+    assign o_DMEM_wen    = dmem_wen;
     assign o_DMEM_addr   = o_DMEM_cen ? alu_result : {BIT_W{1'b0}};
     assign o_DMEM_wdata  = (opcode == STORE) ? reg_rdata2 : {BIT_W{1'b0}};
     assign o_finish      = i_cache_finish;
     assign o_proc_finish = (opcode == ECALL);
 
-    assign stall = i_DMEM_stall | muldiv_stall;
+    assign stall = dmem_stall || muldiv_stall;
 
     assign opcode     = i_IMEM_data[6:0];
     assign has_rs1    = (opcode == JALR) || (opcode == BRANCH) || (opcode == LOAD) || (opcode == STORE)
@@ -144,6 +150,50 @@ module CHIP #(                                                                  
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Always Blocks
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
+
+    always @(*) begin
+        case (state_r)
+            S_NORM: begin
+                if (opcode == STORE && i_DMEM_stall)     state_w = S_SKIP;
+                else if (opcode == LOAD && i_DMEM_stall) state_w = S_LOAD;
+                else                                     state_w = S_NORM;
+            end
+            S_SKIP: begin
+                if (opcode == STORE || opcode == LOAD) state_w = S_STORE;
+                else if (!i_DMEM_stall)                state_w = S_NORM;
+                else                                   state_w = S_SKIP;
+            end
+            S_STORE: begin
+                if (!i_DMEM_stall) state_w = S_NORM;
+                else               state_w = S_STORE;
+            end
+            S_LOAD: begin
+                if (!i_DMEM_stall) state_w = S_NORM;
+                else               state_w = S_LOAD;
+            end
+        endcase
+    end
+
+    always @(*) begin
+        case (state_r)
+            S_NORM: begin
+                dmem_wen   = (opcode == STORE);
+                dmem_stall = (opcode == LOAD) && i_DMEM_stall;
+            end
+            S_SKIP: begin
+                dmem_wen   = 1'b1;
+                dmem_stall = (opcode == LOAD || opcode == STORE);
+            end
+            S_STORE: begin
+                dmem_wen   = 1'b1;
+                dmem_stall = 1'b1;
+            end
+            S_LOAD: begin
+                dmem_wen   = 1'b0;
+                dmem_stall = i_DMEM_stall;
+            end
+        endcase
+    end
 
     always @(*) begin
         if (stall) PC_w = PC_r;
@@ -235,10 +285,12 @@ module CHIP #(                                                                  
 
     always @(posedge i_clk or negedge i_rst_n) begin
         if (!i_rst_n) begin
+            state_r  <= S_NORM;
             PC_r     <= 32'h00010000; // Do not modify this value!!!
             imem_cen <= 1'b1;
         end
         else begin
+            state_r  <= state_w;
             PC_r     <= PC_w;
             imem_cen <= !stall;
         end
@@ -644,7 +696,7 @@ module FFS_unit #(
     wire            empty_lower, empty_upper;
     generate
         if (NUMW == 1) begin: gen_base_case
-            assign o_index[0] = i_bstr[1];
+            assign o_index[0] = (!i_bstr[0] && i_bstr[1]);
             assign o_empty    = ~|i_bstr;
         end
         else begin: gen_recursion
