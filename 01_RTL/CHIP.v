@@ -88,11 +88,11 @@ module CHIP #(                                                                  
 
     assign o_IMEM_addr   = PC_r;
     assign o_IMEM_cen    = imem_cen;
-    assign o_DMEM_cen    = (opcode == LOAD) || (opcode == STORE);
+    assign o_DMEM_cen    = state_r == S_NORM && ((opcode == LOAD) || (opcode == STORE));
     assign o_DMEM_wen    = dmem_wen;
     assign o_DMEM_addr   = o_DMEM_cen ? alu_result : {BIT_W{1'b0}};
     assign o_DMEM_wdata  = (opcode == STORE) ? reg_rdata2 : {BIT_W{1'b0}};
-    assign o_finish      = i_cache_finish;
+    assign o_finish      = !i_DMEM_stall && i_cache_finish;
     assign o_proc_finish = (opcode == ECALL);
 
     assign stall = dmem_stall || muldiv_stall;
@@ -546,7 +546,7 @@ module Cache#(
             S_IDLE: begin
                 if (i_proc_cen && miss && cache_dirty[block_i]) state_w = S_WRITE;
                 else if (i_proc_cen && miss)                    state_w = S_READ;
-                else if (i_proc_finish)                         state_w = S_CLEAN;
+                else if (i_proc_finish && !clean)               state_w = S_CLEAN;
                 else                                            state_w = S_IDLE;
             end
             S_READ:  state_w = i_mem_stall ? S_READ  : S_IDLE;
@@ -590,7 +590,7 @@ module Cache#(
 
     always @(*) begin
         case (state_r)
-            S_IDLE:                    proc_stall = i_proc_cen && miss || i_proc_finish;
+            S_IDLE:                    proc_stall = i_proc_cen && miss;
             S_READ:                    proc_stall = i_mem_stall;
             S_WRITE, S_START, S_CLEAN: proc_stall = 1'b1;
             default:                   proc_stall = 1'b0;
