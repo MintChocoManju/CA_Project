@@ -86,7 +86,7 @@ module CHIP #(                                                                  
     assign o_DMEM_wen    = (opcode == STORE);
     assign o_DMEM_addr   = o_DMEM_cen ? alu_result : {BIT_W{1'b0}};
     assign o_DMEM_wdata  = (opcode == STORE) ? reg_rdata2 : {BIT_W{1'b0}};
-    assign o_finish      = (opcode == ECALL) && !stall;
+    assign o_finish      = i_cache_finish;
     assign o_proc_finish = (opcode == ECALL);
 
     assign stall = i_DMEM_stall | muldiv_stall;
@@ -152,6 +152,7 @@ module CHIP #(                                                                  
                 JAL:     PC_w = PC_r + imm_J;
                 JALR:    PC_w = (reg_rdata1 + imm_I) & MASK_JALR;
                 BRANCH:  PC_w = PC_r + (branch_taken ? imm_B : 4);
+                ECALL:   PC_w = PC_r;
                 default: PC_w = PC_r + 4;
             endcase
         end
@@ -411,11 +412,11 @@ module Cache#(
 // Parameters
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 
-    parameter BYOS_W = 2;
+    parameter SHSIZE = 5;
+    parameter BYOS_W = SHSIZE - 3;
     parameter BLOS_W = 2;
     parameter BLKI_W = 4;
     parameter TAG_W  = ADDR_W - BLKI_W - BLOS_W - BYOS_W;
-    parameter SHSIZE = 5;
     localparam S_IDLE = 3'd0;
     localparam S_READ = 3'd1;
     localparam S_WRITE = 3'd2;
@@ -431,10 +432,11 @@ module Cache#(
     reg  [TAG_W  -1:0] cache_tags [{BLKI_W{1'b1}}:0], cache_tags_w [{BLKI_W{1'b1}}:0];
     reg                cache_valid[{BLKI_W{1'b1}}:0], cache_valid_w[{BLKI_W{1'b1}}:0];
     reg                cache_dirty[{BLKI_W{1'b1}}:0], cache_dirty_w[{BLKI_W{1'b1}}:0];
+    wire [{BLKI_W{1'b1}}:0] packed_dirty;
     
     wire [TAG_W -1:0] tag;
     reg  [TAG_W -1:0] tag_r;
-    wire [BLKI_W-1:0] block_i;
+    wire [BLKI_W-1:0] block_i, block_dirty;
     reg  [BLKI_W-1:0] block_i_r;
     wire [BLOS_W-1:0] block_os;
     reg  [BLOS_W-1:0] block_os_r;
@@ -443,10 +445,10 @@ module Cache#(
     reg                proc_stall, mem_cen, mem_wen;
     reg  [BIT_W  -1:0] proc_rdata, mem_wdata;
     wire [BIT_W*4-1:0] alloc_data_w, alloc_mask_w;
-    reg  [BIT_W*4-1:0] alloc_data,   alloc_mask;
+    reg  [BIT_W*4-1:0] alloc_data_r, alloc_mask_r;
     reg  [ADDR_W -1:0] mem_addr;
 
-    wire miss, make_dirty;
+    wire miss, clean;
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Continuous Assignment
@@ -460,12 +462,28 @@ module Cache#(
     assign o_mem_addr  = mem_addr;
     assign o_mem_wdata = mem_wdata;
 
-    assign {tag, block_i, block_os, byte_os} = i_proc_addr - i_offset;
+    assign o_cache_finish = i_proc_finish && clean;
+
+    assign {tag, block_i, block_os, byte_os} = (state_r != S_IDLE) ? {tag_r, block_i_r, block_os_r, {BYOS_W{1'b0}}}
+                                                                   : i_proc_addr - i_offset;
     assign miss       = !cache_valid[block_i] || (cache_tags[block_i] != tag);
-    assign alloc_data_w = (state_r != S_IDLE) ? alloc_data
+    assign alloc_data_w = (state_r != S_IDLE) ? alloc_data_r
                                               : mem_wen ? (i_proc_wdata << (block_os << SHSIZE)) : {(BIT_W*4){1'b0}};
-    assign alloc_mask_w = (state_r != S_IDLE) ? alloc_mask
+    assign alloc_mask_w = (state_r != S_IDLE) ? alloc_mask_r
                                               : mem_wen ? ~({BIT_W{1'b1}} << (block_os << SHSIZE)) : {(BIT_W*4){1'b1}};
+    
+    genvar gv_i;
+    generate
+        for (gv_i = 0; gv_i <= {BLKI_W{1'b1}}; gv_i = gv_i + 1) begin: pack_dirty
+            assign packed_dirty[gv_i] = cache_dirty[gv_i];
+        end
+    endgenerate
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+// Submoddules
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+
+    FFS_unit#(.NUMW(BLKI_W)) ffs_unit_dirty (.i_bstr(packed_dirty), .o_index(block_dirty), .o_empty(clean));
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Always Blocks
@@ -474,15 +492,15 @@ module Cache#(
     always @(*) begin
         case (state_r)
             S_IDLE: begin
-                if (miss && cache_dirty[block_i]) state_w = S_WRITE;
-                else if (miss)                    state_w = S_READ;
-                else if (i_proc_finish)           state_w = S_CLEAN;
-                else                              state_w = S_IDLE;
+                if (i_proc_cen && miss && cache_dirty[block_i]) state_w = S_WRITE;
+                else if (i_proc_cen && miss)                    state_w = S_READ;
+                else if (i_proc_finish)                         state_w = S_CLEAN;
+                else                                            state_w = S_IDLE;
             end
             S_READ:  state_w = i_mem_stall ? S_READ  : S_IDLE;
             S_WRITE: state_w = i_mem_stall ? S_WRITE : S_IDLE;
             S_START: state_w = S_READ;
-            S_CLEAN: state_w = S_CLEAN;
+            S_CLEAN: state_w = i_mem_stall ? S_CLEAN : S_IDLE;
         endcase
     end
 
@@ -495,7 +513,7 @@ module Cache#(
                 cache_valid_w[i] = 1'b1;
             end
             else if (state_r == S_READ && i == block_i_r) begin
-                cache_data_w [i] = i_mem_rdata & alloc_mask | alloc_data;
+                cache_data_w [i] = i_mem_rdata & alloc_mask_r | alloc_data_r;
                 cache_tags_w [i] = tag_r;
                 cache_valid_w[i] = 1'b1;
             end
@@ -510,24 +528,26 @@ module Cache#(
     always @(*) begin
         for (i = 0; i <= {BLKI_W{1'b1}}; i = i + 1) begin
             if (state_r == S_IDLE && i_proc_cen && i_proc_wen && i == block_i) cache_dirty_w[i] = 1'b1;
-            else if (state_r == S_READ && alloc_mask == {(BIT_W*4){1'b1}})     cache_dirty_w[i] = 1'b0;
+            else if (state_r == S_READ
+                  && alloc_mask_r == {(BIT_W*4){1'b1}} && i == block_i_r)      cache_dirty_w[i] = 1'b0;
+            else if (state_r == S_CLEAN && i == block_dirty)                   cache_dirty_w[i] = i_mem_stall;
             else                                                               cache_dirty_w[i] = cache_dirty[i];
         end
     end
 
     always @(*) begin
         case (state_r)
-            S_IDLE:           proc_stall = i_proc_cen && miss;
-            S_READ:           proc_stall = i_mem_stall;
-            S_WRITE, S_START: proc_stall = 1'b1;
-            default:          proc_stall = 1'b0;
+            S_IDLE:                    proc_stall = i_proc_cen && miss || i_proc_finish;
+            S_READ:                    proc_stall = i_mem_stall;
+            S_WRITE, S_START, S_CLEAN: proc_stall = 1'b1;
+            default:                   proc_stall = 1'b0;
         endcase
     end
 
     always @(*) begin
         case (state_r)
-            S_IDLE:  proc_rdata = cache_data  [block_i][{block_os,   {(BYOS_W+3){1'b0}}} +: BIT_W];
-            S_READ:  proc_rdata = cache_data_w[block_i][{block_os_r, {(BYOS_W+3){1'b0}}} +: BIT_W];
+            S_IDLE:  proc_rdata = cache_data  [block_i][{block_os,   {SHSIZE{1'b0}}} +: BIT_W];
+            S_READ:  proc_rdata = cache_data_w[block_i][{block_os_r, {SHSIZE{1'b0}}} +: BIT_W];
             default: proc_rdata = {BIT_W{1'b0}};
         endcase
     end
@@ -535,8 +555,8 @@ module Cache#(
     always @(*) begin
         case (state_r)
             S_IDLE: begin
-                mem_cen = i_proc_cen && miss;
-                mem_wen = i_proc_cen && miss && cache_dirty[block_i];
+                mem_cen = i_proc_cen && miss || i_proc_finish && !clean;
+                mem_wen = i_proc_cen && miss && cache_dirty[block_i] || i_proc_finish && !clean;
             end
             S_READ: begin
                 mem_cen = 1'b1;
@@ -546,7 +566,7 @@ module Cache#(
                 mem_cen = 1'b1;
                 mem_wen = 1'b0;
             end
-            S_WRITE: begin
+            S_WRITE, S_CLEAN: begin
                 mem_cen = 1'b1;
                 mem_wen = 1'b1;
             end
@@ -561,8 +581,9 @@ module Cache#(
         case (state_r)
             S_IDLE:          mem_addr = (cache_dirty[block_i] ? {cache_tags[block_i], block_i, {(BLOS_W+BYOS_W){1'b0}}}
                                                               : {tag,                 block_i, {(BLOS_W+BYOS_W){1'b0}}}) + i_offset;
-            S_READ, S_START: mem_addr = {tag_r                , block_i_r, {(BLOS_W+BYOS_W){1'b0}}} + i_offset;
-            S_WRITE:         mem_addr = {cache_tags[block_i_r], block_i_r, {(BLOS_W+BYOS_W){1'b0}}} + i_offset;
+            S_READ, S_START: mem_addr = {tag_r                  , block_i_r  , {(BLOS_W+BYOS_W){1'b0}}} + i_offset;
+            S_WRITE:         mem_addr = {cache_tags[block_i_r]  , block_i_r  , {(BLOS_W+BYOS_W){1'b0}}} + i_offset;
+            S_CLEAN:         mem_addr = {cache_tags[block_dirty], block_dirty, {(BLOS_W+BYOS_W){1'b0}}} + i_offset;
             default:         mem_addr = {ADDR_W{1'b0}};
         endcase
     end
@@ -571,8 +592,73 @@ module Cache#(
         case (state_r)
             S_IDLE:  mem_wdata = cache_data[block_i];
             S_WRITE: mem_wdata = cache_data[block_i_r];
+            S_CLEAN: mem_wdata = cache_data[block_dirty];
             default: mem_wdata = {(BIT_W*4){1'b0}};
         endcase
     end
 
+    always @(posedge i_clk or negedge i_rst_n) begin
+        if (!i_rst_n) begin
+            for (i = 0; i <= {BLKI_W{1'b1}}; i = i + 1) begin
+                cache_data [i] <= {(BIT_W*4){1'b0}};
+                cache_tags [i] <= {TAG_W    {1'b0}};
+                cache_valid[i] <= 1'b0;
+                cache_dirty[i] <= 1'b0;
+            end
+            state_r      <= S_IDLE;
+            tag_r        <= {TAG_W    {1'b0}};
+            block_i_r    <= {BLKI_W   {1'b0}};
+            block_os_r   <= {BLOS_W   {1'b0}};
+            alloc_data_r <= {(BIT_W*4){1'b0}};
+            alloc_mask_r <= {(BIT_W*4){1'b0}};
+        end
+        else begin
+            for (i = 0; i <= {BLKI_W{1'b1}}; i = i + 1) begin
+                cache_data [i] <= cache_data_w [i];
+                cache_tags [i] <= cache_tags_w [i];
+                cache_valid[i] <= cache_valid_w[i];
+                cache_dirty[i] <= cache_dirty_w[i];
+            end
+            state_r      <= state_w;
+            tag_r        <= tag;
+            block_i_r    <= block_i;
+            block_os_r   <= block_os;
+            alloc_data_r <= alloc_data_w;
+            alloc_mask_r <= alloc_mask_w;
+        end
+    end
+
+endmodule
+
+module FFS_unit #(
+    parameter NUMW = 4
+) (
+    input  [{NUMW{1'b1}}:0] i_bstr,
+    output [NUMW-1      :0] o_index,
+    output                  o_empty
+);
+
+    wire [NUMW-2:0] index_lower, index_upper;
+    wire            empty_lower, empty_upper;
+    generate
+        if (NUMW == 1) begin
+            assign o_index[0] = i_bstr[1];
+            assign o_empty    = ~|i_bstr;
+        end
+        else begin
+            FFS_unit#(.NUMW(NUMW-1)) ffs_unit_lower (
+                .i_str(i_bstr[{(NUMW-1){1'b1}}:0]),
+                .o_index(index_lower),
+                .o_empty(empty_lower)
+            );
+            FFS_unit#(.NUMW(NUMW-1)) ffs_unit_upper (
+                .i_str(i_bstr[{(NUMW){1'b1}}:{1'b1, {(NUMW-1){1'b0}}}]),
+                .o_index(index_upper),
+                .o_empty(empty_upper)
+            );
+            assign o_index = empty_lower ? {1'b1, {(NUMW-1){1'b0}}} + index_upper : index_lower;
+            assign o_empty = empty_lower && empty_upper;
+        end
+    endgenerate
+    
 endmodule
