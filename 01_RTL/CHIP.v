@@ -501,10 +501,11 @@ module Cache#(
             S_WRITE: state_w = i_mem_stall ? S_START : S_IDLE;
             S_START: state_w = S_READ;
             S_CLEAN: state_w = i_mem_stall ? S_CLEAN : S_IDLE;
+            default: state_w = S_IDLE;
         endcase
     end
 
-    integer i;
+    reg [BLKI_W:0] i;
     always @(*) begin
         for (i = 0; i <= {BLKI_W{1'b1}}; i = i + 1) begin
             if (state_r == S_IDLE && i_proc_cen && i_proc_wen && !miss && i == block_i) begin
@@ -642,11 +643,11 @@ module FFS_unit #(
     wire [NUMW-2:0] index_lower, index_upper;
     wire            empty_lower, empty_upper;
     generate
-        if (NUMW == 1) begin
+        if (NUMW == 1) begin: gen_base_case
             assign o_index[0] = i_bstr[1];
             assign o_empty    = ~|i_bstr;
         end
-        else begin
+        else begin: gen_recursion
             FFS_unit#(.NUMW(NUMW-1)) ffs_unit_lower (
                 .i_bstr(i_bstr[{(NUMW-1){1'b1}}:0]),
                 .o_index(index_lower),
