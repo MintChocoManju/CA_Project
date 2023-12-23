@@ -489,9 +489,9 @@ module Cache#(
     assign o_mem_wen = o_wen;
     assign o_mem_cen = o_cen;
     assign o_proc_finish = o_finish;
-    assign o_proc_rdata = o_p_data;
+    assign o_proc_rdata = o_p_data_nxt;
 
-    assign o_proc_stall = i_mem_stall | cache_stall;
+    assign o_proc_stall = i_mem_stall | cache_stall_nxt;
 
     assign o_cache_finish = finish;
 
@@ -618,7 +618,7 @@ module Cache#(
                     end
                     o_wen_nxt = 1'b1;
                     o_cen_nxt = 1'b1;
-                    cache_stall_nxt = 1'b0;
+                    cache_stall_nxt = 1'b1;
                     state_nxt = S_WMEM;
                 end
                 else begin      // cache miss
