@@ -144,8 +144,6 @@ module CHIP #(                                                                  
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Always Blocks
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
-    
-    // Todo: any combinational/sequential circuit
 
     always @(*) begin
         if (stall) PC_w = PC_r;
@@ -244,6 +242,7 @@ module CHIP #(                                                                  
             imem_cen <= !stall;
         end
     end
+
 endmodule
 
 module Reg_file(i_clk, i_rst_n, wen, rs1, rs2, rd, wdata, rdata1, rdata2);
@@ -406,18 +405,174 @@ module Cache#(
     input  [ADDR_W-1: 0] i_offset
 );
 
-    assign o_cache_available = 0; // change this value to 1 if the cache is implemented
+    assign o_cache_available = 1'b1; // change this value to 1 if the cache is implemented
 
-    //------------------------------------------//
-    //          default connection              //
-    assign o_mem_cen = i_proc_cen;              //
-    assign o_mem_wen = i_proc_wen;              //
-    assign o_mem_addr = i_proc_addr;            //
-    assign o_mem_wdata = i_proc_wdata;          //
-    assign o_proc_rdata = i_mem_rdata[0+:BIT_W];//
-    assign o_proc_stall = i_mem_stall;          //
-    //------------------------------------------//
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+// Parameters
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
 
-    // Todo: BONUS
+    parameter BYOS_W = 2;
+    parameter BLOS_W = 2;
+    parameter BLKI_W = 4;
+    parameter TAG_W  = ADDR_W - BLKI_W - BLOS_W - BYOS_W;
+    parameter SHSIZE = 5;
+    localparam S_IDLE = 3'd0;
+    localparam S_READ = 3'd1;
+    localparam S_WRITE = 3'd2;
+    localparam S_START = 3'd3;
+    localparam S_CLEAN = 3'd4;
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+// Wires and Registers
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+
+    reg  [2:0] state_r, state_w;
+    reg  [BIT_W*4-1:0] cache_data [{BLKI_W{1'b1}}:0], cache_data_w [{BLKI_W{1'b1}}:0];
+    reg  [TAG_W  -1:0] cache_tags [{BLKI_W{1'b1}}:0], cache_tags_w [{BLKI_W{1'b1}}:0];
+    reg                cache_valid[{BLKI_W{1'b1}}:0], cache_valid_w[{BLKI_W{1'b1}}:0];
+    reg                cache_dirty[{BLKI_W{1'b1}}:0], cache_dirty_w[{BLKI_W{1'b1}}:0];
+    
+    wire [TAG_W -1:0] tag;
+    reg  [TAG_W -1:0] tag_r;
+    wire [BLKI_W-1:0] block_i;
+    reg  [BLKI_W-1:0] block_i_r;
+    wire [BLOS_W-1:0] block_os;
+    reg  [BLOS_W-1:0] block_os_r;
+    wire [BYOS_W-1:0] byte_os;
+
+    reg                proc_stall, mem_cen, mem_wen;
+    reg  [BIT_W  -1:0] proc_rdata, mem_wdata;
+    wire [BIT_W*4-1:0] alloc_data_w, alloc_mask_w;
+    reg  [BIT_W*4-1:0] alloc_data,   alloc_mask;
+    reg  [ADDR_W -1:0] mem_addr;
+
+    wire miss, make_dirty;
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+// Continuous Assignment
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+
+    assign o_proc_stall = proc_stall;
+    assign o_proc_rdata = proc_rdata;
+
+    assign o_mem_cen   = mem_cen;
+    assign o_mem_wen   = mem_wen;
+    assign o_mem_addr  = mem_addr;
+    assign o_mem_wdata = mem_wdata;
+
+    assign {tag, block_i, block_os, byte_os} = i_proc_addr - i_offset;
+    assign miss       = !cache_valid[block_i] || (cache_tags[block_i] != tag);
+    assign alloc_data_w = (state_r != S_IDLE) ? alloc_data
+                                              : mem_wen ? (i_proc_wdata << (block_os << SHSIZE)) : {(BIT_W*4){1'b0}};
+    assign alloc_mask_w = (state_r != S_IDLE) ? alloc_mask
+                                              : mem_wen ? ~({BIT_W{1'b1}} << (block_os << SHSIZE)) : {(BIT_W*4){1'b1}};
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+// Always Blocks
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+
+    always @(*) begin
+        case (state_r)
+            S_IDLE: begin
+                if (miss && cache_dirty[block_i]) state_w = S_WRITE;
+                else if (miss)                    state_w = S_READ;
+                else if (i_proc_finish)           state_w = S_CLEAN;
+                else                              state_w = S_IDLE;
+            end
+            S_READ:  state_w = i_mem_stall ? S_READ  : S_IDLE;
+            S_WRITE: state_w = i_mem_stall ? S_WRITE : S_IDLE;
+            S_START: state_w = S_READ;
+            S_CLEAN: state_w = S_CLEAN;
+        endcase
+    end
+
+    integer i;
+    always @(*) begin
+        for (i = 0; i <= {BLKI_W{1'b1}}; i = i + 1) begin
+            if (state_r == S_IDLE && i_proc_cen && i_proc_wen && !miss && i == block_i) begin
+                cache_data_w [i] = cache_data[i] & alloc_mask_w | alloc_data_w;
+                cache_tags_w [i] = cache_tags[i];
+                cache_valid_w[i] = 1'b1;
+            end
+            else if (state_r == S_READ && i == block_i_r) begin
+                cache_data_w [i] = i_mem_rdata & alloc_mask | alloc_data;
+                cache_tags_w [i] = tag_r;
+                cache_valid_w[i] = 1'b1;
+            end
+            else begin
+                cache_data_w [i] = cache_data [i];
+                cache_tags_w [i] = cache_tags [i];
+                cache_valid_w[i] = cache_valid[i];
+            end
+        end
+    end
+
+    always @(*) begin
+        for (i = 0; i <= {BLKI_W{1'b1}}; i = i + 1) begin
+            if (state_r == S_IDLE && i_proc_cen && i_proc_wen && i == block_i) cache_dirty_w[i] = 1'b1;
+            else if (state_r == S_READ && alloc_mask == {(BIT_W*4){1'b1}})     cache_dirty_w[i] = 1'b0;
+            else                                                               cache_dirty_w[i] = cache_dirty[i];
+        end
+    end
+
+    always @(*) begin
+        case (state_r)
+            S_IDLE:           proc_stall = i_proc_cen && miss;
+            S_READ:           proc_stall = i_mem_stall;
+            S_WRITE, S_START: proc_stall = 1'b1;
+            default:          proc_stall = 1'b0;
+        endcase
+    end
+
+    always @(*) begin
+        case (state_r)
+            S_IDLE:  proc_rdata = cache_data  [block_i][{block_os,   {(BYOS_W+3){1'b0}}} +: BIT_W];
+            S_READ:  proc_rdata = cache_data_w[block_i][{block_os_r, {(BYOS_W+3){1'b0}}} +: BIT_W];
+            default: proc_rdata = {BIT_W{1'b0}};
+        endcase
+    end
+
+    always @(*) begin
+        case (state_r)
+            S_IDLE: begin
+                mem_cen = i_proc_cen && miss;
+                mem_wen = i_proc_cen && miss && cache_dirty[block_i];
+            end
+            S_READ: begin
+                mem_cen = 1'b1;
+                mem_wen = 1'b0;
+            end
+            S_READ, S_START: begin
+                mem_cen = 1'b1;
+                mem_wen = 1'b0;
+            end
+            S_WRITE: begin
+                mem_cen = 1'b1;
+                mem_wen = 1'b1;
+            end
+            default: begin
+                mem_cen = 1'b0;
+                mem_wen = 1'b0;
+            end
+        endcase
+    end
+
+    always @(*) begin
+        case (state_r)
+            S_IDLE:          mem_addr = (cache_dirty[block_i] ? {cache_tags[block_i], block_i, {(BLOS_W+BYOS_W){1'b0}}}
+                                                              : {tag,                 block_i, {(BLOS_W+BYOS_W){1'b0}}}) + i_offset;
+            S_READ, S_START: mem_addr = {tag_r                , block_i_r, {(BLOS_W+BYOS_W){1'b0}}} + i_offset;
+            S_WRITE:         mem_addr = {cache_tags[block_i_r], block_i_r, {(BLOS_W+BYOS_W){1'b0}}} + i_offset;
+            default:         mem_addr = {ADDR_W{1'b0}};
+        endcase
+    end
+
+    always @(*) begin
+        case (state_r)
+            S_IDLE:  mem_wdata = cache_data[block_i];
+            S_WRITE: mem_wdata = cache_data[block_i_r];
+            default: mem_wdata = {(BIT_W*4){1'b0}};
+        endcase
+    end
 
 endmodule
