@@ -112,7 +112,8 @@ module CHIP #(                                                                  
     assign imm_B      = {{BIT_W-12{i_IMEM_data[31]}}, i_IMEM_data[7], i_IMEM_data[30:25], i_IMEM_data[11:8], 1'b0};
     assign imm_U      = {i_IMEM_data[31:12], 12'b0};
     assign imm_J      = {{BIT_W-20{i_IMEM_data[31]}}, i_IMEM_data[19:12], i_IMEM_data[20], i_IMEM_data[30:21], 1'b0};
-    assign alu_active = (opcode == BRANCH) || (opcode == LOAD) || (opcode == STORE) || (opcode == IOP32) || (opcode == ROP32);
+    assign alu_active = (opcode == JALR) || (opcode == BRANCH) || (opcode == LOAD) || (opcode == STORE)
+                     || (opcode == IOP32) || (opcode == ROP32);
     assign alu_mul    = (alu_operation == MUL);
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -200,7 +201,7 @@ module CHIP #(                                                                  
         else begin
             case (opcode)
                 JAL:     PC_w = PC_r + imm_J;
-                JALR:    PC_w = (reg_rdata1 + imm_I) & MASK_JALR;
+                JALR:    PC_w = alu_result & MASK_JALR;
                 BRANCH:  PC_w = PC_r + (branch_taken ? imm_B : 4);
                 ECALL:   PC_w = PC_r;
                 default: PC_w = PC_r + 4;
@@ -232,7 +233,7 @@ module CHIP #(                                                                  
                 else                              alu_operation = {7'b0              , i_IMEM_data[14:12]};
                 alu_operand   = imm_I;
             end
-            LOAD: begin
+            LOAD, JALR: begin
                 alu_operation = ADD;
                 alu_operand   = imm_I;
             end
