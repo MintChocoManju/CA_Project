@@ -2,6 +2,15 @@
 ## Description
 This project is an RTL (Register Transfer Level) implementation of a RISC-V CPU featuring a 2kb direct-mapped L1 cache. It aims to demonstrate  the operational principles of CPU stalls during multicycle operations and the process of data access with an L1 cache. A write-back cache policy is adopted to enhance efficiency, particularly for tasks with substantial IO requirements, such as sorting.
 
+## Supported Instructions
+- auipc, jal, jalr
+- add, sub, and, xor
+- addi, slli, slti, srai
+- lw, sw
+- mul
+- beq, bge, blt, bne
+- ecall (End of Program)
+
 ## Requirements
 - Synopsys VCS (Verilog Compiler Simulator) or compatible tool
 
