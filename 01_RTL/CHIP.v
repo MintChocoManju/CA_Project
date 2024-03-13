@@ -433,518 +433,287 @@ module SLT_unit #(
 endmodule
 
 module Cache#(
-        parameter BIT_W = 32,
-        parameter ADDR_W = 32
-    )(
-        input i_clk,
-        input i_rst_n,
-        // processor interface
-            input i_proc_cen,
-            input i_proc_wen,
-            input [ADDR_W-1:0] i_proc_addr,
-            input [BIT_W-1:0]  i_proc_wdata,
-            output [BIT_W-1:0] o_proc_rdata,
-            output o_proc_stall,
-            input i_proc_finish,
-            output o_cache_finish,
-        // memory interface
-            output o_mem_cen,
-            output o_mem_wen,
-            output [ADDR_W-1:0] o_mem_addr,
-            output [BIT_W*4-1:0]  o_mem_wdata,
-            input [BIT_W*4-1:0] i_mem_rdata,
-            input i_mem_stall,
-            output o_cache_available,
-        // others
-        input  [ADDR_W-1: 0] i_offset
-    );
+    parameter BIT_W = 32,
+    parameter ADDR_W = 32
+) (
+    input i_clk,
+    input i_rst_n,
+    // processor interface
+    input               i_proc_cen,
+    input               i_proc_wen,
+    input  [ADDR_W-1:0] i_proc_addr,
+    input  [BIT_W -1:0] i_proc_wdata,
+    output [BIT_W -1:0] o_proc_rdata,
+    output              o_proc_stall,
+    input               i_proc_finish,
+    output              o_cache_finish,
+    // memory interface
+    output               o_mem_cen,
+    output               o_mem_wen,
+    output [ADDR_W -1:0] o_mem_addr,
+    output [BIT_W*4-1:0] o_mem_wdata,
+    input  [BIT_W*4-1:0] i_mem_rdata,
+    input                i_mem_stall,
+    output               o_cache_available,
+    // others
+    input  [ADDR_W-1: 0] i_offset
+);
 
-    assign o_cache_available = 1; // change this value to 1 if the cache is implemented
+    assign o_cache_available = 1'b1; // change this value to 1 if the cache is implemented
 
-    //------------------------------------------//
-    //          default connection              //
-    // assign o_mem_cen = i_proc_cen;              //
-    // assign o_mem_wen = i_proc_wen;              //
-    // assign o_mem_addr = i_proc_addr;            //
-    // assign o_mem_wdata = i_proc_wdata;          //
-    // assign o_proc_rdata = i_mem_rdata[0+:BIT_W];//
-    // assign o_proc_stall = i_mem_stall;          //
-    //------------------------------------------//
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+// Parameters
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
 
-    // Todo: BONUS
-    // Cache state
-    parameter S_IDLE = 3'd0;
-    parameter S_WRITE = 3'd1;
-    parameter S_READ = 3'd2;
-    parameter S_WB = 3'd3;
-    // parameter S_WT = 3'd4;
-    parameter S_WMEM = 3'd5;
-    parameter S_RMEM = 3'd6;
-
-    // Cache parameter
-    parameter NUM_SETS = 2;
-    parameter NUM_LINES = 8;
-    parameter LINE_SIZE = 16;   // size of cache line(byte)
-
-    // Calculate bit field parameters
-    parameter OFFSET_BITS = $clog2(LINE_SIZE);
-    parameter INDEX_BITS = $clog2(NUM_LINES);
-    parameter TAG_BITS = 32 - OFFSET_BITS - INDEX_BITS;
-
-    integer x, y;
+    parameter SHSIZE = 5;
+    parameter BYOS_W = SHSIZE - 3;
+    parameter BLOS_W = 2;
+    parameter BLKI_W = 4;
+    parameter TAG_W  = ADDR_W - BLKI_W - BLOS_W - BYOS_W;
+    localparam S_IDLE = 3'd0;
+    localparam S_READ = 3'd1;
+    localparam S_WRITE = 3'd2;
+    localparam S_START = 3'd3;
+    localparam S_CLEAN = 3'd4;
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Wires and Registers
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
+
+    reg  [2:0] state_r, state_w;
+    reg  [BIT_W*4-1:0] cache_data [{BLKI_W{1'b1}}:0], cache_data_w [{BLKI_W{1'b1}}:0];
+    reg  [TAG_W  -1:0] cache_tags [{BLKI_W{1'b1}}:0], cache_tags_w [{BLKI_W{1'b1}}:0];
+    reg                cache_valid[{BLKI_W{1'b1}}:0], cache_valid_w[{BLKI_W{1'b1}}:0];
+    reg                cache_dirty[{BLKI_W{1'b1}}:0], cache_dirty_w[{BLKI_W{1'b1}}:0];
+    wire [{BLKI_W{1'b1}}:0] packed_dirty;
     
-    reg [2:0] state, state_nxt;
+    wire [TAG_W -1:0] tag;
+    reg  [TAG_W -1:0] tag_r;
+    wire [BLKI_W-1:0] block_i, block_dirty;
+    reg  [BLKI_W-1:0] block_i_r;
+    wire [BLOS_W-1:0] block_os;
+    reg  [BLOS_W-1:0] block_os_r;
+    wire [BYOS_W-1:0] byte_os;
 
-    //  Cache memory arrays
-    reg [TAG_BITS-1:0] cache_tag[0:NUM_LINES-1][0:NUM_SETS-1];
-    reg [TAG_BITS-1:0] cache_tag_nxt[0:NUM_LINES-1][0:NUM_SETS-1];
-    reg [LINE_SIZE*8-1:0] cache_data[0:NUM_LINES-1][0:NUM_SETS-1];
-    reg [LINE_SIZE*8-1:0] cache_data_nxt[0:NUM_LINES-1][0:NUM_SETS-1];
-    reg cache_valid[0:NUM_LINES-1][0:NUM_SETS-1];
-    reg cache_valid_nxt[0:NUM_LINES-1][0:NUM_SETS-1];
-    reg cache_dirty[0:NUM_LINES-1][0:NUM_SETS-1];
-    reg cache_dirty_nxt[0:NUM_LINES-1][0:NUM_SETS-1];
+    reg                proc_stall, mem_cen, mem_wen;
+    reg  [BIT_W  -1:0] proc_rdata;
+    wire [BIT_W*4-1:0] alloc_data_w, alloc_mask_w;
+    reg  [BIT_W*4-1:0] mem_wdata, alloc_data_r, alloc_mask_r;
+    reg  [ADDR_W -1:0] mem_addr;
 
-    // wire and assignment
-    reg [OFFSET_BITS-1:0] i_offset_bit, i_offset_bit_nxt;
-    reg [INDEX_BITS-1:0] i_index, i_index_nxt;
-    reg [TAG_BITS-1:0] i_tag, i_tag_nxt;
-    wire hit_s0, hit_s1;
-    wire hit;
-
-    reg [ADDR_W-1:0] i_p_addr, i_p_addr_nxt;
-    reg [ADDR_W-1:0] i_p_wdata, i_p_wdata_nxt;
-
-    reg [BIT_W-1:0] o_p_data, o_p_data_nxt;
-    reg [BIT_W-1:0] o_m_addr, o_m_addr_nxt;
-    reg [BIT_W*4-1:0] o_m_data, o_m_data_nxt;
-
-    reg o_cen, o_wen;
-    reg o_cen_nxt, o_wen_nxt;
-    reg o_finish;
-
-    reg [1:0] write_bit;
-
-    reg cache_stall, cache_stall_nxt;
-
-    reg finish;
+    wire miss, clean;
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Continuous Assignment
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 
-    assign o_mem_addr = o_m_addr;
-    assign o_mem_wdata = o_m_data;
-    assign o_mem_wen = o_wen;
-    assign o_mem_cen = o_cen;
-    assign o_proc_finish = o_finish;
-    assign o_proc_rdata = o_p_data_nxt;
+    assign o_proc_stall = proc_stall;
+    assign o_proc_rdata = proc_rdata;
 
-    assign o_proc_stall = i_mem_stall | cache_stall_nxt;
+    assign o_mem_cen   = mem_cen;
+    assign o_mem_wen   = mem_wen;
+    assign o_mem_addr  = mem_addr;
+    assign o_mem_wdata = mem_wdata;
 
-    assign o_cache_finish = finish;
+    assign o_cache_finish = i_proc_finish && clean;
 
-    // check hit status
-    assign hit_s0 = (cache_valid[i_index][0] && (cache_tag[i_index][0] == i_tag)) ? 1 : 0;
-    assign hit_s1 = (cache_valid[i_index][1] && (cache_tag[i_index][1] == i_tag)) ? 1 : 0;
-    assign hit = hit_s0 | hit_s1;
+    assign {tag, block_i, block_os, byte_os} = (state_r != S_IDLE) ? {tag_r, block_i_r, block_os_r, {BYOS_W{1'b0}}}
+                                                                   : i_proc_addr - i_offset;
+    assign miss       = !cache_valid[block_i] || (cache_tags[block_i] != tag);
+    assign alloc_data_w = (state_r != S_IDLE) ? alloc_data_r
+                                              : i_proc_wen ? (i_proc_wdata << {block_os, {SHSIZE{1'b0}}}) : {(BIT_W*4){1'b0}};
+    assign alloc_mask_w = (state_r != S_IDLE) ? alloc_mask_r
+                                              : i_proc_wen ? ~({BIT_W{1'b1}} << {block_os, {SHSIZE{1'b0}}}) : {(BIT_W*4){1'b1}};
+    
+    genvar gv_i;
+    generate
+        for (gv_i = 0; gv_i <= {BLKI_W{1'b1}}; gv_i = gv_i + 1) begin: pack_dirty
+            assign packed_dirty[gv_i] = cache_dirty[gv_i];
+        end
+    endgenerate
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+// Submoddules
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
+
+    FFS_unit#(.NUMW(BLKI_W)) ffs_unit_dirty (.i_bstr(packed_dirty), .o_index(block_dirty), .o_empty(clean));
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Always Blocks
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 
-    // update tag, index, offset bits, processor input address
     always @(*) begin
-        if(i_proc_cen) begin
-            i_offset_bit_nxt = i_proc_addr[OFFSET_BITS-1:0];
-            i_index_nxt = i_proc_addr[OFFSET_BITS+INDEX_BITS-1:OFFSET_BITS];
-            i_tag_nxt = i_proc_addr[31:OFFSET_BITS+INDEX_BITS];
-            i_p_addr_nxt = i_proc_addr;
-            i_p_wdata_nxt = i_proc_wdata;
-        end
-        else begin
-            i_offset_bit_nxt = i_offset_bit;
-            i_index_nxt = i_index;
-            i_tag_nxt = i_tag;
-            i_p_addr_nxt = i_p_addr;
-            i_p_wdata_nxt = i_p_wdata;
-        end
-    end
-
-
-    // FSM
-    always @(*) begin
-        state_nxt = state;
-        o_cen_nxt = o_cen;
-        o_wen_nxt = o_wen;
-        o_p_data_nxt = o_p_data;
-        o_m_data_nxt = o_m_data;
-        o_m_addr_nxt = o_m_addr;
-        cache_stall_nxt = cache_stall; 
-        for (x = 0; x < NUM_LINES; x=x+1) begin
-            for (y = 0; y < NUM_SETS; y=y+1) begin
-                cache_data_nxt[x][y] = cache_data[x][y];
-                cache_tag_nxt[x][y] = cache_tag[x][y];
-                cache_dirty_nxt[x][y] = cache_dirty[x][y];
-                cache_valid_nxt[x][y] = cache_valid[x][y];
-            end
-        end
-        case(state)
+        case (state_r)
             S_IDLE: begin
-                if (i_proc_cen) begin
-                    if(i_proc_wen) begin
-                        cache_stall_nxt = 1'b1;
-                        state_nxt = S_WRITE;
-                    end
-                    else begin
-                        cache_stall_nxt = 1'b1;
-                        state_nxt = S_READ;
-                    end
-                end
-                else begin
-                    cache_stall_nxt = 1'b0;
-                    state_nxt = S_IDLE;
-                end
+                if (i_proc_cen && miss && cache_dirty[block_i]) state_w = S_WRITE;
+                else if (i_proc_cen && miss)                    state_w = S_READ;
+                else if (i_proc_finish && !clean)               state_w = S_CLEAN;
+                else                                            state_w = S_IDLE;
             end
-            S_WRITE: begin
-                if(hit) begin
-                    if(hit_s0) begin
-                        case(i_offset_bit)
-                            4'h0: begin
-                                cache_data_nxt[i_index][0][31:0] = i_p_wdata;
-                                cache_dirty_nxt[i_index][0] = 1'b1;
-                            end
-                            4'h4: begin
-                                cache_data_nxt[i_index][0][63:32] = i_p_wdata;
-                                cache_dirty_nxt[i_index][0] = 1'b1;
-                            end
-                            4'h8: begin
-                                cache_data_nxt[i_index][0][95:64] = i_p_wdata;
-                                cache_dirty_nxt[i_index][0] = 1'b1;
-                            end
-                            4'hc: begin
-                                cache_data_nxt[i_index][0][127:96] = i_p_wdata;
-                                cache_dirty_nxt[i_index][0] = 1'b1;
-                            end
-                            default: begin
-                                cache_data_nxt[i_index][0] = cache_data[i_index][0];
-                                cache_dirty_nxt[i_index][0] = cache_dirty[i_index][0];
-                            end
-                        endcase
-                        o_m_data_nxt = cache_data_nxt[i_index][0][127:0];
-                    end
-                    else begin
-                        case(i_offset_bit)
-                            4'h0: begin
-                                cache_data_nxt[i_index][1][31:0] = i_p_wdata;
-                                cache_dirty_nxt[i_index][1] = 1'b1;
-                            end
-                            4'h4: begin
-                                cache_data_nxt[i_index][1][63:32] = i_p_wdata;
-                                cache_dirty_nxt[i_index][1] = 1'b1;
-                            end
-                            4'h8: begin
-                                cache_data_nxt[i_index][1][95:64] = i_p_wdata;
-                                cache_dirty_nxt[i_index][1] = 1'b1;
-                            end
-                            4'hc: begin
-                                cache_data_nxt[i_index][1][127:96] = i_p_wdata;
-                                cache_dirty_nxt[i_index][1] = 1'b1;
-                            end
-                            default: begin
-                                cache_data_nxt[i_index][1] = cache_data[i_index][1];
-                                cache_dirty_nxt[i_index][1] = cache_dirty[i_index][1];
-                            end
-                        endcase
-                        o_m_data_nxt = cache_data_nxt[i_index][1][127:0];
-                    end
-
-                    if({i_p_addr[31:4], 4'h0} < i_offset) begin
-                        o_m_addr_nxt = i_offset;
-                    end
-                    else begin
-                        o_m_addr_nxt = {i_p_addr[31:4], 4'h0};
-                    end
-                    o_wen_nxt = 1'b1;
-                    o_cen_nxt = 1'b1;
-                    cache_stall_nxt = 1'b1;
-                    state_nxt = S_WMEM;
-                end
-                else begin      // cache miss
-                    if (!cache_valid[i_index][0] || !cache_valid[i_index][1]) begin     // set0 or set1 was empty
-                        if({i_p_addr[31:4], 4'h0} < i_offset) begin
-                            o_m_addr_nxt = i_offset;
-                        end
-                        else begin
-                            o_m_addr_nxt = {i_p_addr[31:4], 4'h0};
-                        end
-                        state_nxt = S_RMEM;
-                    end
-                    else begin      // all set are full
-                        if({i_p_addr[31:4], 4'h0} < i_offset) begin
-                            o_m_addr_nxt = i_offset;
-                        end
-                        else begin
-                            o_m_addr_nxt = {i_p_addr[31:4], 4'h0};
-                        end
-                        state_nxt = S_RMEM;
-                    end
-                    o_wen_nxt = 1'b0;
-                    o_cen_nxt = 1'b1;
-                    o_m_data_nxt = o_m_data;
-                    cache_data_nxt[i_index][0] = cache_data[i_index][0];
-                    cache_dirty_nxt[i_index][0] = cache_dirty[i_index][0];
-                    cache_data_nxt[i_index][1] = cache_data[i_index][1];
-                    cache_dirty_nxt[i_index][1] = cache_dirty[i_index][1];
-                    cache_stall_nxt = cache_stall;
-                end
-            end
-            S_READ: begin
-                if(hit) begin
-                    if(hit_s0) begin
-                        case(i_offset_bit)
-                            4'h0:   o_p_data_nxt = cache_data[i_index][0][31:0];
-                            4'h4:   o_p_data_nxt = cache_data[i_index][0][63:32];
-                            4'h8:   o_p_data_nxt = cache_data[i_index][0][95:64];
-                            4'hc:   o_p_data_nxt = cache_data[i_index][0][127:96];
-                            default: o_p_data_nxt = o_p_data;
-                        endcase
-                    end
-                    else begin
-                        case(i_offset_bit)
-                            4'h0:   o_p_data_nxt = cache_data[i_index][1][31:0];
-                            4'h4:   o_p_data_nxt = cache_data[i_index][1][63:32];
-                            4'h8:   o_p_data_nxt = cache_data[i_index][1][95:64];
-                            4'hc:   o_p_data_nxt = cache_data[i_index][1][127:96];
-                            default: o_p_data_nxt = o_p_data;
-                        endcase
-                    end
-                    o_m_addr_nxt = o_m_addr;
-                    cache_stall_nxt = 1'b0;
-                    o_wen_nxt = o_wen;
-                    o_cen_nxt = o_cen;
-                    state_nxt = S_IDLE;
-                end
-                else begin
-                    if({i_p_addr[31:4], 4'h0} < i_offset) begin
-                        o_m_addr_nxt = i_offset;
-                    end
-                    else begin
-                        o_m_addr_nxt = {i_p_addr[31:4], 4'h0};
-                    end
-                    cache_stall_nxt = 1'b1;
-                    o_wen_nxt = 1'b0;
-                    o_cen_nxt = 1'b1;
-                    state_nxt = S_RMEM;
-                end
-            end
-            S_WMEM: begin
-                if(!i_mem_stall) begin
-                    cache_stall_nxt = 1'b0;
-                    o_wen_nxt = 1'b0;
-                    o_cen_nxt = 1'b0;
-                    state_nxt = S_IDLE; 
-                end
-                else begin
-                    cache_stall_nxt = 1'b1;
-                    o_wen_nxt = o_wen;
-                    o_cen_nxt = o_cen;
-                    state_nxt = state;
-                end
-            end
-            S_RMEM: begin
-                if(!i_mem_stall) begin      // memory read finish
-
-                    if (!cache_valid[i_index][0]) begin     // set0 is empty
-                        if({i_p_addr[31:4], 4'h0} < i_offset) begin      // data address < offset
-                            case(i_offset[3:0])
-                                4'h0:   cache_data_nxt[i_index][0][BIT_W*4-1:0] = i_mem_rdata;
-                                4'h4:   cache_data_nxt[i_index][0][BIT_W*4-1:0] = {i_mem_rdata[95:0], {32{1'b0}}};
-                                4'h8:   cache_data_nxt[i_index][0][BIT_W*4-1:0] = {i_mem_rdata[63:0], {64{1'b0}}};
-                                4'hc:   cache_data_nxt[i_index][0][BIT_W*4-1:0] = {i_mem_rdata[31:0], {96{1'b0}}};
-                                default:    cache_data_nxt[i_index][0][BIT_W*4-1:0] = cache_data[i_index][0][BIT_W*4-1:0];
-                            endcase
-                        end
-                        else begin
-                            cache_data_nxt[i_index][0][BIT_W*4-1:0] = i_mem_rdata;
-                        end
-                        
-                        case(i_offset_bit[3:0])
-                            4'h0:   o_p_data_nxt = cache_data_nxt[i_index][0][31:0];
-                            4'h4:   o_p_data_nxt = cache_data_nxt[i_index][0][63:32];
-                            4'h8:   o_p_data_nxt = cache_data_nxt[i_index][0][95:64];
-                            4'hc:   o_p_data_nxt = cache_data_nxt[i_index][0][127:96];
-                            default: o_p_data_nxt = o_p_data;
-                        endcase
-
-                        cache_valid_nxt[i_index][0] = 1'b1;
-                        cache_tag_nxt[i_index][0][TAG_BITS-1:0] = i_tag;
-                    end
-                    else if (!cache_valid[i_index][1]) begin    // set1 is empty
-                        if({i_p_addr[31:4], 4'h0} < i_offset) begin
-                            case(i_offset[3:0])
-                                4'h0:   cache_data_nxt[i_index][1][BIT_W*4-1:0] = i_mem_rdata;
-                                4'h4:   cache_data_nxt[i_index][1][BIT_W*4-1:0] = {i_mem_rdata[95:0], {32{1'b0}}};
-                                4'h8:   cache_data_nxt[i_index][1][BIT_W*4-1:0] = {i_mem_rdata[63:0], {64{1'b0}}};
-                                4'hc:   cache_data_nxt[i_index][1][BIT_W*4-1:0] = {i_mem_rdata[31:0], {96{1'b0}}};
-                                default:    cache_data_nxt[i_index][1][BIT_W*4-1:0] = cache_data[i_index][1][BIT_W*4-1:0];
-                            endcase
-                        end
-                        else begin
-                            cache_data_nxt[i_index][1][BIT_W*4-1:0] = i_mem_rdata;
-                        end
-                        
-                        case(i_offset_bit[3:0])
-                            4'h0:   o_p_data_nxt = cache_data_nxt[i_index][1][31:0];
-                            4'h4:   o_p_data_nxt = cache_data_nxt[i_index][1][63:32];
-                            4'h8:   o_p_data_nxt = cache_data_nxt[i_index][1][95:64];
-                            4'hc:   o_p_data_nxt = cache_data_nxt[i_index][1][127:96];
-                            default: o_p_data_nxt = o_p_data;
-                        endcase
-
-                        cache_valid_nxt[i_index][1] = 1'b1;
-                        cache_tag_nxt[i_index][1][TAG_BITS-1:0] = i_tag;
-                    end
-                    else begin
-                        if({i_p_addr[31:4], 4'h0} < i_offset) begin
-                            case(i_offset[3:0])
-                                4'h0:   cache_data_nxt[i_index][write_bit][BIT_W*4-1:0] = i_mem_rdata;
-                                4'h4:   cache_data_nxt[i_index][write_bit][BIT_W*4-1:0] = {i_mem_rdata[95:0], {32{1'b0}}};
-                                4'h8:   cache_data_nxt[i_index][write_bit][BIT_W*4-1:0] = {i_mem_rdata[63:0], {64{1'b0}}};
-                                4'hc:   cache_data_nxt[i_index][write_bit][BIT_W*4-1:0] = {i_mem_rdata[31:0], {96{1'b0}}};
-                                default:    cache_data_nxt[i_index][write_bit][BIT_W*4-1:0] = cache_data[i_index][write_bit][BIT_W*4-1:0];
-                            endcase
-                        end
-                        else begin
-                            cache_data_nxt[i_index][write_bit][BIT_W*4-1:0] = i_mem_rdata;
-                        end
-                        
-                        case(i_offset_bit[3:0])
-                            4'h0:   o_p_data_nxt = cache_data_nxt[i_index][write_bit][31:0];
-                            4'h4:   o_p_data_nxt = cache_data_nxt[i_index][write_bit][63:32];
-                            4'h8:   o_p_data_nxt = cache_data_nxt[i_index][write_bit][95:64];
-                            4'hc:   o_p_data_nxt = cache_data_nxt[i_index][write_bit][127:96];
-                            default: o_p_data_nxt = o_p_data;
-                        endcase
-
-                        cache_valid_nxt[i_index][write_bit] = 1'b1;
-                        cache_tag_nxt[i_index][write_bit][TAG_BITS-1:0] = i_tag;
-                    end               
-
-                    if(!i_proc_wen) begin    // read
-                        cache_stall_nxt = 1'b0;
-                        o_cen_nxt = 1'b0;
-                        o_wen_nxt = 1'b0;
-                        state_nxt = S_IDLE;
-                    end
-                    else begin      // write
-                        cache_stall_nxt = 1'b1;
-                        o_cen_nxt = o_cen;
-                        o_wen_nxt = o_wen;
-                        state_nxt = S_WRITE;
-                    end
-                end
-                else begin
-                    cache_stall_nxt = 1'b1;
-                    state_nxt = state;
-                    o_cen_nxt = o_cen;
-                    o_wen_nxt = o_wen;
-                    for (x = 0; x < NUM_LINES; x=x+1) begin
-                        for (y = 0; y < NUM_SETS; y=y+1) begin
-                            cache_data_nxt[x][y] = cache_data[x][y];
-                            cache_tag_nxt[x][y] = cache_tag[x][y];
-                            cache_dirty_nxt[x][y] = cache_dirty[x][y];
-                            cache_valid_nxt[x][y] = cache_valid[x][y];
-                        end
-                    end
-                end
-            end
-            default: begin
-                state_nxt = state;
-                o_cen_nxt = o_cen;
-                o_wen_nxt = o_wen;
-                o_p_data_nxt = o_p_data;
-                o_m_data_nxt = o_m_data;
-                o_m_addr_nxt = o_m_addr;
-                cache_stall_nxt = cache_stall; 
-                for (x = 0; x < NUM_LINES; x=x+1) begin
-                    for (y = 0; y < NUM_SETS; y=y+1) begin
-                        cache_data_nxt[x][y] = cache_data[x][y];
-                        cache_tag_nxt[x][y] = cache_tag[x][y];
-                        cache_dirty_nxt[x][y] = cache_dirty[x][y];
-                        cache_valid_nxt[x][y] = cache_valid[x][y];
-                    end
-                end
-            end
-        endcase 
+            S_READ:  state_w = i_mem_stall ? S_READ  : S_IDLE;
+            S_WRITE: state_w = i_mem_stall ? S_START : S_IDLE;
+            S_START: state_w = S_READ;
+            S_CLEAN: state_w = i_mem_stall ? S_CLEAN : S_IDLE;
+            default: state_w = S_IDLE;
+        endcase
     end
+
+    reg [BLKI_W:0] i;
     always @(*) begin
-        if (!o_proc_stall) begin
-            if (i_proc_finish) begin
-                finish = 1'b1;
+        for (i = 0; i <= {BLKI_W{1'b1}}; i = i + 1) begin
+            if (state_r == S_IDLE && i_proc_cen && i_proc_wen && !miss && i == block_i) begin
+                cache_data_w [i] = cache_data[i] & alloc_mask_w | alloc_data_w;
+                cache_tags_w [i] = cache_tags[i];
+                cache_valid_w[i] = 1'b1;
+            end
+            else if (state_r == S_READ && i == block_i_r) begin
+                cache_data_w [i] = i_mem_rdata & alloc_mask_r | alloc_data_r;
+                cache_tags_w [i] = tag_r;
+                cache_valid_w[i] = 1'b1;
             end
             else begin
-                finish = 1'b0;
+                cache_data_w [i] = cache_data [i];
+                cache_tags_w [i] = cache_tags [i];
+                cache_valid_w[i] = cache_valid[i];
             end
         end
-        else begin
-            finish = 1'b0;
+    end
+
+    always @(*) begin
+        for (i = 0; i <= {BLKI_W{1'b1}}; i = i + 1) begin
+            if (state_r == S_IDLE && i_proc_cen && i_proc_wen && i == block_i) cache_dirty_w[i] = 1'b1;
+            else if (state_r == S_READ
+                  && alloc_mask_r == {(BIT_W*4){1'b1}} && i == block_i_r)      cache_dirty_w[i] = 1'b0;
+            else if (state_r == S_CLEAN && i == block_dirty)                   cache_dirty_w[i] = i_mem_stall;
+            else                                                               cache_dirty_w[i] = cache_dirty[i];
         end
     end
-    
+
+    always @(*) begin
+        case (state_r)
+            S_IDLE:                    proc_stall = i_proc_cen && miss;
+            S_READ:                    proc_stall = i_mem_stall;
+            S_WRITE, S_START, S_CLEAN: proc_stall = 1'b1;
+            default:                   proc_stall = 1'b0;
+        endcase
+    end
+
+    always @(*) begin
+        case (state_r)
+            S_IDLE:  proc_rdata = cache_data  [block_i][{block_os,   {SHSIZE{1'b0}}} +: BIT_W];
+            S_READ:  proc_rdata = cache_data_w[block_i][{block_os_r, {SHSIZE{1'b0}}} +: BIT_W];
+            default: proc_rdata = {BIT_W{1'b0}};
+        endcase
+    end
+
+    always @(*) begin
+        case (state_r)
+            S_IDLE: begin
+                mem_cen = i_proc_cen && miss || i_proc_finish && !clean;
+                mem_wen = i_proc_cen && miss && cache_dirty[block_i] || i_proc_finish && !clean;
+            end
+            S_READ: begin
+                mem_cen = 1'b1;
+                mem_wen = 1'b0;
+            end
+            S_READ, S_START: begin
+                mem_cen = 1'b1;
+                mem_wen = 1'b0;
+            end
+            S_WRITE, S_CLEAN: begin
+                mem_cen = 1'b1;
+                mem_wen = 1'b1;
+            end
+            default: begin
+                mem_cen = 1'b0;
+                mem_wen = 1'b0;
+            end
+        endcase
+    end
+
+    always @(*) begin
+        case (state_r)
+            S_IDLE:          mem_addr = (i_proc_finish        ? {cache_tags[block_dirty], block_dirty, {(BLOS_W+BYOS_W){1'b0}}}
+                                       : cache_dirty[block_i] ? {cache_tags[block_i],     block_i, {(BLOS_W+BYOS_W){1'b0}}}
+                                                              : {tag,                     block_i, {(BLOS_W+BYOS_W){1'b0}}}) + i_offset;
+            S_READ, S_START: mem_addr = {tag_r                  , block_i_r  , {(BLOS_W+BYOS_W){1'b0}}} + i_offset;
+            S_WRITE:         mem_addr = {cache_tags[block_i_r]  , block_i_r  , {(BLOS_W+BYOS_W){1'b0}}} + i_offset;
+            S_CLEAN:         mem_addr = {cache_tags[block_dirty], block_dirty, {(BLOS_W+BYOS_W){1'b0}}} + i_offset;
+            default:         mem_addr = {ADDR_W{1'b0}};
+        endcase
+    end
+
+    always @(*) begin
+        case (state_r)
+            S_IDLE:  mem_wdata = i_proc_finish ? cache_data[block_dirty] : cache_data[block_i];
+            S_WRITE: mem_wdata = cache_data[block_i_r];
+            S_CLEAN: mem_wdata = cache_data[block_dirty];
+            default: mem_wdata = {(BIT_W*4){1'b0}};
+        endcase
+    end
 
     always @(posedge i_clk or negedge i_rst_n) begin
         if (!i_rst_n) begin
-            state <= S_IDLE;
-            i_offset_bit <= 0;
-            i_index <= 0;
-            i_tag <= 0;
-            i_p_addr <= 0;
-            i_p_wdata <= 0;
-            for (x = 0; x < NUM_LINES; x=x+1) begin
-                for (y = 0; y < NUM_SETS; y=y+1) begin
-                    cache_data[x][y] <= 128'b0;
-                    cache_tag[x][y] <= {TAG_BITS{1'b0}};
-                    cache_dirty[x][y] <= 1'b0;
-                    cache_valid[x][y] <= 1'b0;
-                end
+            for (i = 0; i <= {BLKI_W{1'b1}}; i = i + 1) begin
+                cache_data [i] <= {(BIT_W*4){1'b0}};
+                cache_tags [i] <= {TAG_W    {1'b0}};
+                cache_valid[i] <= 1'b0;
+                cache_dirty[i] <= 1'b0;
             end
-            cache_stall <= 0;
-            o_finish <= 0;
-            o_m_addr <= 0;
-            o_m_data <= 0;
-            o_cen <=0;
-            o_wen <= 0;
-            o_p_data <= 0;
-            write_bit <= 0;
+            state_r      <= S_IDLE;
+            tag_r        <= {TAG_W    {1'b0}};
+            block_i_r    <= {BLKI_W   {1'b0}};
+            block_os_r   <= {BLOS_W   {1'b0}};
+            alloc_data_r <= {(BIT_W*4){1'b0}};
+            alloc_mask_r <= {(BIT_W*4){1'b0}};
         end
         else begin
-            write_bit <= write_bit + 1'b1;
-            state <= state_nxt;
-            i_offset_bit <= i_offset_bit_nxt;
-            i_index <= i_index_nxt;
-            i_tag <= i_tag_nxt;
-            i_p_addr <= i_p_addr_nxt;
-            i_p_wdata <= i_p_wdata_nxt;
-            for (x = 0; x < NUM_LINES; x=x+1) begin
-                for (y = 0; y < NUM_SETS; y=y+1) begin
-                    cache_data[x][y] <= cache_data_nxt[x][y];
-                    cache_tag[x][y] <= cache_tag_nxt[x][y];
-                    cache_dirty[x][y] <= cache_dirty_nxt[x][y];
-                    cache_valid[x][y] <= cache_valid_nxt[x][y];
-                end
+            for (i = 0; i <= {BLKI_W{1'b1}}; i = i + 1) begin
+                cache_data [i] <= cache_data_w [i];
+                cache_tags [i] <= cache_tags_w [i];
+                cache_valid[i] <= cache_valid_w[i];
+                cache_dirty[i] <= cache_dirty_w[i];
             end
-            cache_stall <= cache_stall_nxt;
-            o_p_data <= o_p_data_nxt;
-            o_m_data <= o_m_data_nxt;
-            o_m_addr <= o_m_addr_nxt;
-            o_wen <= o_wen_nxt;
-            o_cen <= o_cen_nxt;
+            state_r      <= state_w;
+            tag_r        <= tag;
+            block_i_r    <= block_i;
+            block_os_r   <= block_os;
+            alloc_data_r <= alloc_data_w;
+            alloc_mask_r <= alloc_mask_w;
         end
     end
 
+endmodule
+
+module FFS_unit #(
+    parameter NUMW = 4
+) (
+    input  [{NUMW{1'b1}}:0] i_bstr,
+    output [NUMW-1      :0] o_index,
+    output                  o_empty
+);
+
+    wire [NUMW-2:0] index_lower, index_upper;
+    wire            empty_lower, empty_upper;
+    generate
+        if (NUMW == 1) begin: gen_base_case
+            assign o_index[0] = (!i_bstr[0] && i_bstr[1]);
+            assign o_empty    = ~|i_bstr;
+        end
+        else begin: gen_recursion
+            FFS_unit#(.NUMW(NUMW-1)) ffs_unit_lower (
+                .i_bstr(i_bstr[{(NUMW-1){1'b1}}:0]),
+                .o_index(index_lower),
+                .o_empty(empty_lower)
+            );
+            FFS_unit#(.NUMW(NUMW-1)) ffs_unit_upper (
+                .i_bstr(i_bstr[{(NUMW){1'b1}}:{1'b1, {(NUMW-1){1'b0}}}]),
+                .o_index(index_upper),
+                .o_empty(empty_upper)
+            );
+            assign o_index = empty_lower ? {1'b1, {(NUMW-1){1'b0}}} + index_upper : index_lower;
+            assign o_empty = empty_lower && empty_upper;
+        end
+    endgenerate
+    
 endmodule
